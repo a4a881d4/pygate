@@ -56,6 +56,7 @@ struct work {
 	char pdata[128];
 	char phash[32];
 	uint32_t max_nonce;
+	uint32_t target;
 	uint64_t nHashesDone;
 };
 #pragma pack(pop)
@@ -75,95 +76,15 @@ inline uint32_t ByteReverse(uint32_t value)
 		value = ((value & 0xFF00FF00) >> 8) | ((value & 0x00FF00FF) << 8);
     return (value<<16) | (value>>16);
 }
-
 inline __m128i ByteReverseM128(__m128i value)
 {
 	  const __m128i t00FF = _mm_set1_epi32(0x00FF00FF);
 	  const __m128i tFF00 = _mm_set1_epi32(0xFF00FF00);
 	  
     value=_mm_or_si128(_mm_srli_epi32(_mm_and_si128(value,tFF00),8),_mm_slli_epi32(_mm_and_si128(value,t00FF),8));
-    
-    //value = ((value & 0xFF00FF00) >> 8) | ((value & 0x00FF00FF) << 8);
     return _mm_or_si128(_mm_srli_epi32(value,16),_mm_slli_epi32(value,16));
 }
 
-inline __m128i _mm_mod_epi32( __m128i a, uint32_t s )
-{
-	union {
-		__m128i m;
-		uint32_t i[4];
-	} mi;
-	mi.m=a;
-	mi.i[0]%=s;
-	mi.i[1]%=s;
-	mi.i[2]%=s;
-	mi.i[3]%=s;
-	return mi.m;	
-}
-inline __m128i _mm_mul_epi32( __m128i a, uint32_t s )
-{
-	union {
-		__m128i m;
-		uint32_t i[4];
-	} mi;
-	mi.m=a;
-	mi.i[0]*=s;
-	mi.i[1]*=s;
-	mi.i[2]*=s;
-	mi.i[3]*=s;
-	return mi.m;	
-}
-
-inline __m128i checkMod( __m128i a[8], uint32_t b )
-{
-	int i;
-	__m128i c[8];
-	union {
-		__m128i m;
-		uint32_t i[4];
-	} mi;
-	
-	uint32_t m = (uint32_t)(0x100000000ULL%b);
-	//printf("%x %x\n",b,m);
-	for( i=0;i<8;i++ ) {
-		c[i] = _mm_mod_epi32(a[i],b);
-		mi.m = c[i];
-		//printf("c[%d]=%d\n",i,(int)mi.i[0]);
-	}
-	for( i=7;i>=1;i-- ) {
-		c[i-1] = _mm_add_epi32(c[i-1],_mm_mul_epi32(c[i],m));
-		c[i-1] = _mm_mod_epi32(c[i-1],b);
-		mi.m = c[i-1];
-		//printf("c[%d]=%d\n",i-1,(int)mi.i[0]);
-	}
-	return _mm_mod_epi32(c[0],b);	
-}
-/*
-inline __m128i check3_5_17(__m128i m[8]) 
-{
-	__m128i t = _mm_set1_epi32(0);
-	const __m128i tFF = _mm_set1_epi32(0xFF);  
-	for( i=0;i<8;i++ ) {
-		__m128i c = m[i];
-		t = _mm_add_epi32(t,_mm_mod_epi32(c,tFF));
-	}
-	return _mm_mod_epi32(c,tFF);
-}
-*/
-extern "C" uint32_t checkmod( uint32_t a[8], uint32_t b )
-{
-	__m128i t[8];
-	int i;
-	for( i=0;i<8;i++ )
-		t[i] = _mm_set1_epi32(a[i]);
-	__m128i r = checkMod(t,b);
-	union {
-		__m128i m;
-		uint32_t i[4];
-	} mi;
-	mi.m=r;
-	return mi.i[0];
-}
 /*int scanhash_sse2_64(int thr_id, const unsigned char *pmidstate,
 	unsigned char *pdata,
 	unsigned char *phash1, unsigned char *phash,
@@ -180,21 +101,6 @@ extern "C" int scanhash_sse2_64( const void *pWork )
 	char *phash = pwork->phash;
 	uint32_t max_nonce = pwork->max_nonce;
 	uint64_t *nHashesDone = &(pwork->nHashesDone);
-	
-	
-	/*
-	printf("work\n");
-	char *pc = (char *)pWork;
-	for( i=0;i<sizeof(struct work);i++ )
-		printf("%02x",(int)pc[i]&0xff);
-	printf("\n");
-	unsigned int tmp[21];
-	for (unsigned int i = 0; i < 20; i++)
-  	tmp[i] = (((unsigned int*)&pwork->pdata)[i]);
-		
-	uint256 testout = Hash(tmp,tmp+20);
-	printf("%s\n",testout.GetHex().c_str());
-	*/
 	FormatHashBuffers(pwork->pdata,pmidstate,pdata2,phash1);
 	uint32_t *nNonce_p = (uint32_t *)(pdata + 12);
 	uint32_t nonce = ByteReverse(*nNonce_p);
@@ -204,26 +110,6 @@ extern "C" int scanhash_sse2_64( const void *pWork )
 	uint32_t m_midstate[8], m_w[16], m_w1[16];
 	__m128i m_4w[64], m_4hash[64], m_4hash1[64];
 	__m128i offset;
-	/*
-	printf("midstate:\n");
-	pc = (char *)pmidstate;
-	for( i=0;i<32;i++ )
-		printf("%02x",(int)pc[i]&0xff);
-	printf("\n");
-
-	printf("hash1:\n");
-	pc = (char *)phash1;
-	for( i=0;i<64;i++ )
-		printf("%02x",(int)pc[i]&0xff);
-	printf("\n");
-
-	printf("data:\n");
-	pc = (char *)pdata2;
-	for( i=0;i<128;i++ )
-		printf("%02x",(int)pc[i]&0xff);
-	printf("\n");
-	printf("%x\n",*nNonce_p);
-	*/
 	/* For debugging */
 	union {
 		__m128i m;
@@ -254,50 +140,34 @@ extern "C" int scanhash_sse2_64( const void *pWork )
 
 		/* Some optimization can be done here W.R.T. precalculating some hash */
 		CalcSha256_x64(m_4hash1, m_4w, m_midstate,g_4sha256_k);
-		/*
-		printf("fist round\n");
-		for (i = 0; i < 8; i++) {
-			mi.m = m_4hash1[i];
-			*(uint32_t *)&(phash)[i*4] = mi.i[0];
-		}
-		printf("hash1:\n");
-		pc = (char *)phash;
-		for( i=0;i<32;i++ )
-			printf("%02x",(int)pc[i]&0xff);
-		printf("\n");
-		*/
 		CalcSha256_x64(m_4hash, m_4hash1, g_sha256_hinit,g_4sha256_k);
 		
-		j=0;
 		for (i = 0; i < 8; i++) {
 			m_4hash[i]=ByteReverseM128(m_4hash[i]);
 		}
-		mi.m = checkMod(m_4hash,210); 
-		/*		//if (fulltest(phash, ptarget))
-	printf("hash:\n");
-	pc = (char *)phash;
-	for( i=0;i<32;i++ )
-		printf("%02x",(int)pc[i]&0xff);
-	printf("\n");
-	*/for( j=0;j<4;j++ )
-		if( mi.i[j]==0 )
-		{
-			*nHashesDone = nonce;
-			*nNonce_p = ByteReverse(nonce + j);
+		for( j=0;j<4;j++ ) {
+			mi.m = m_4hash[7];
+			if( (mi.i[4]&0x80000000)==0 )
+				continue;
+			mi.m = m_4hash[0];
+			if( (mi.i[0]&0x1)==1 )
+				continue;
+			if( checkInt(m_4hash,j,target)==0 ) {
+				*nHashesDone = nonce;
+				*nNonce_p = ByteReverse(nonce + j);
 			
-			for( i=0;i<8;i++ ) {
-				yi.m=m_4hash[i];
-				((uint32_t*)phash)[i]=yi.i[j];
+				for( i=0;i<8;i++ ) {
+					yi.m=m_4hash[i];
+					((uint32_t*)phash)[i]=yi.i[j];
+				}
+				return nonce + j;
 			}
-			
-			return nonce + j;
-		}
-		nonce += 4;
+			nonce += 4;
 
-		if (unlikely((nonce >= max_nonce))) {
-			*nHashesDone = nonce;
-			return -1;
-		}
+			if (unlikely((nonce >= max_nonce))) {
+				*nHashesDone = nonce;
+				return -1;
+			}
 	}
 }
 
