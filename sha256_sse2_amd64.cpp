@@ -57,6 +57,7 @@ struct work {
 	char phash[32];
 	uint32_t max_nonce;
 	uint32_t target;
+	uint64_t mulfactor;
 	uint64_t nHashesDone;
 };
 #pragma pack(pop)
@@ -71,7 +72,10 @@ inline uint256 Hash(const T1 pbegin, const T1 pend)
     SHA256((unsigned char*)&hash1, sizeof(hash1), (unsigned char*)&hash2);
     return hash2;
 }
-inline uint32_t ByteReverse(uint32_t value)
+
+#define ByteReverse(x) ByteReverseHash(x)
+
+inline uint32_t ByteReverseHash(uint32_t value)
 {
 		value = ((value & 0xFF00FF00) >> 8) | ((value & 0x00FF00FF) << 8);
     return (value<<16) | (value>>16);
@@ -84,12 +88,33 @@ inline __m128i ByteReverseM128(__m128i value)
     value=_mm_or_si128(_mm_srli_epi32(_mm_and_si128(value,tFF00),8),_mm_slli_epi32(_mm_and_si128(value,t00FF),8));
     return _mm_or_si128(_mm_srli_epi32(value,16),_mm_slli_epi32(value,16));
 }
-
+inline uint32_t checkInt( __m128i a[8], int j, uint32_t target )
+{
+	uint64_t r,m;
+	m = (1ULL<<32)%target;
+	int i;
+	union {
+		__m128i m;
+		uint32_t i[4];
+	} mi;
+	r=0;
+	for( i=7;i>=0;i-- ) {
+		r*=m;
+		mi.m=a[i];
+		r+=mi.i[j];
+		r%=target;
+	}
+	return (uint32_t)r;
+}
 /*int scanhash_sse2_64(int thr_id, const unsigned char *pmidstate,
 	unsigned char *pdata,
 	unsigned char *phash1, unsigned char *phash,
 	const unsigned char *ptarget,
 	uint32_t max_nonce, unsigned long *nHashesDone) */
+const uint32_t primesT1=3*5*7;
+const uint32_t primesT2=11*13*17*19*23*29;
+const uint32_t primesT3=31*37*41*43*47;
+
 extern "C" int scanhash_sse2_64( const void *pWork )
 {
 	int i;
@@ -104,9 +129,7 @@ extern "C" int scanhash_sse2_64( const void *pWork )
 	FormatHashBuffers(pwork->pdata,pmidstate,pdata2,phash1);
 	uint32_t *nNonce_p = (uint32_t *)(pdata + 12);
 	uint32_t nonce = ByteReverse(*nNonce_p);
-	
-	printf("max = %d, nonce = %d\n",max_nonce,nonce);
-	
+
 	uint32_t m_midstate[8], m_w[16], m_w1[16];
 	__m128i m_4w[64], m_4hash[64], m_4hash1[64];
 	__m128i offset;
@@ -137,7 +160,7 @@ extern "C" int scanhash_sse2_64( const void *pWork )
 		int j;
 
 		m_4w[3] = _mm_add_epi32(offset, _mm_set1_epi32(nonce));
-
+		m_4w[3] = ByteReverseM128(m_4w[3]);
 		/* Some optimization can be done here W.R.T. precalculating some hash */
 		CalcSha256_x64(m_4hash1, m_4w, m_midstate,g_4sha256_k);
 		CalcSha256_x64(m_4hash, m_4hash1, g_sha256_hinit,g_4sha256_k);
@@ -147,27 +170,46 @@ extern "C" int scanhash_sse2_64( const void *pWork )
 		}
 		for( j=0;j<4;j++ ) {
 			mi.m = m_4hash[7];
-			if( (mi.i[4]&0x80000000)==0 )
+			if( (mi.i[j]&0x80000000)==0 )
 				continue;
 			mi.m = m_4hash[0];
-			if( (mi.i[0]&0x1)==1 )
+			if( (mi.i[j]&0x1)==1 )
 				continue;
-			if( checkInt(m_4hash,j,target)==0 ) {
-				*nHashesDone = nonce;
-				*nNonce_p = ByteReverse(nonce + j);
+			if( checkInt(m_4hash,j,primesT1)==0 ) {
+				int c = 0;
+				uint64_t mul=1;
+				uint32_t T = checkInt(m_4hash,j,primesT2);
+				if( !(T%11) ) c++; else mul*=11;
+				if( !(T%13) ) c++; else mul*=13;
+				if( !(T%17) ) c++; else mul*=17;
+				if( !(T%19) ) c++; else mul*=19;
+				if( !(T%23) ) c++; else mul*=23;
+				if( !(T%29) ) c++; else mul*=29;
+				T = checkInt(m_4hash,j,primesT3);
+				if( !(T%31) ) c++; else mul*=31;
+				if( !(T%37) ) c++; else mul*=37;
+				if( !(T%41) ) c++; else mul*=41;
+				if( !(T%43) ) c++; else mul*=43;
+				if( !(T%47) ) c++; else mul*=47;
+				if( c>=pwork->target ) { 		
+					*nHashesDone = nonce;
+					*nNonce_p = ByteReverse(nonce + j);
 			
-				for( i=0;i<8;i++ ) {
-					yi.m=m_4hash[i];
-					((uint32_t*)phash)[i]=yi.i[j];
+					for( i=0;i<8;i++ ) {
+						yi.m=m_4hash[i];
+						((uint32_t*)phash)[i]=yi.i[j];
+					}
+					pwork->mulfactor = mul;
+					return nonce + j;
 				}
-				return nonce + j;
 			}
-			nonce += 4;
+		}
+		nonce += 4;
 
-			if (unlikely((nonce >= max_nonce))) {
-				*nHashesDone = nonce;
-				return -1;
-			}
+		if (unlikely((nonce >= max_nonce))) {
+			*nHashesDone = nonce;
+			return -1;
+		}
 	}
 }
 
